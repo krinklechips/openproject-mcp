@@ -22,9 +22,17 @@ import {
   appendInlineImages,
   prepareAttachments,
   uploadPreparedAttachments,
+  uploadPreparedAttachmentsWith,
   type AttachmentInput,
   type UploadedAttachmentResult,
 } from './attachments.ts';
+import { WIKI_API_LIMITATION, buildWikiAttachmentMarkdown, summarizeWikiPage } from './wiki.ts';
+import {
+  WIKI_CREDENTIALS_MISSING,
+  createWikiSession,
+  resolveMarkdownInput,
+  type OpenProjectWikiSession,
+} from './wiki-session.ts';
 import { buildMemberTaskFilters, groupWorkPackagesByProjectMemberStatus } from './member-tasks.ts';
 import {
   DEFAULT_STATUS_TASK_PAGE_SIZE,
@@ -193,6 +201,13 @@ export const attachmentInputSchema = z.object({
 });
 
 /**
+ * Attachment input for wiki pages. Identical to {@link attachmentInputSchema}
+ * minus `inline`: a wiki page body cannot be written through the API, so no file
+ * can be embedded into the page and offering the flag would be misleading.
+ */
+export const wikiAttachmentInputSchema = attachmentInputSchema.omit({ inline: true });
+
+/**
  * Upload attachments to a work package, then embed any inline images into its
  * description. Returns the per-file upload results and, when inline images were
  * added, the work package after its description was patched. The supplied
@@ -277,6 +292,20 @@ export async function resolveProjectRef(
 
   const match = matches[0]!;
   return { id: match.id, name: match.name };
+}
+
+/**
+ * Resolve a project reference to its URL identifier (e.g. "kup-kardal-portal").
+ * The wiki write tools drive OpenProject's web routes, and those are addressed
+ * by project identifier rather than numeric ID.
+ */
+export async function resolveProjectIdentifier(
+  client: OpenProjectClient,
+  projectRef: number | string
+): Promise<{ id: number; identifier: string; name: string }> {
+  const resolved = await resolveProjectRef(client, projectRef);
+  const project = await client.getProject(resolved.id);
+  return { id: project.id, identifier: project.identifier, name: project.name };
 }
 
 /**
@@ -453,6 +482,16 @@ export function setupMcpServer(config: ServerConfig = {}): { server: McpServer; 
   const initClient = async (): Promise<OpenProjectClient> => {
     client = createClient('system');
     return client;
+  };
+
+  // Wiki writes go through a web session rather than the API key. It is created
+  // on first use so the server still starts (with every other tool working) when
+  // no wiki credentials are configured.
+  let wikiSession: OpenProjectWikiSession | null = null;
+  const requireWikiSession = (): OpenProjectWikiSession => {
+    if (!wikiSession) wikiSession = createWikiSession();
+    if (!wikiSession) throw new Error(WIKI_CREDENTIALS_MISSING);
+    return wikiSession;
   };
 
   // ============== Root & Configuration Tools ==============
@@ -1555,6 +1594,244 @@ export function setupMcpServer(config: ServerConfig = {}): { server: McpServer; 
       } catch (error) {
         logger.logToolResult(caller, toolName, false, undefined, error as Error);
         return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    }
+  );
+
+  // ============== Wiki Page Tools ==============
+
+  server.tool(
+    'get_wiki_page',
+    'Get a wiki page by its numeric ID. IMPORTANT: OpenProject API v3 exposes wiki pages as metadata only — this returns the id, title, owning project and attachment link, and CANNOT return the page body/markdown. ' +
+      'The API also provides no way to list wiki pages, search them, or look one up by title, and no way to create, update, or delete a wiki page (see OpenProject API FAQ). ' +
+      'If the user asks to read page content or to write a wiki page, say the OpenProject API does not support it and point them to the web UI instead of guessing.',
+    {
+      id: z.number().describe('Wiki page ID (numeric; the API cannot resolve wiki pages by title or slug)'),
+    },
+    async ({ id }) => {
+      const toolName = 'get_wiki_page';
+      const caller = `tool:${toolName}`;
+      logger.logToolInvocation(caller, toolName, { id });
+      client.setCaller(caller);
+
+      try {
+        const result = summarizeWikiPage(await client.getWikiPage(id));
+        const response = { content: [{ type: 'text' as const, text: formatResponse(result) }] };
+        logger.logToolResult(caller, toolName, true, result);
+        return response;
+      } catch (error) {
+        logger.logToolResult(caller, toolName, false, undefined, error as Error);
+        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'list_wiki_page_attachments',
+    'List the files attached to a wiki page. Use delete_attachment to remove one by its attachment ID.',
+    {
+      id: z.number().describe('Wiki page ID'),
+    },
+    async ({ id }) => {
+      const toolName = 'list_wiki_page_attachments';
+      const caller = `tool:${toolName}`;
+      logger.logToolInvocation(caller, toolName, { id });
+      client.setCaller(caller);
+
+      try {
+        const result = addAgentPaginationContinuation(toolName, await client.listWikiPageAttachments(id));
+        const response = { content: [{ type: 'text' as const, text: formatResponse(result) }] };
+        logger.logToolResult(caller, toolName, true, result);
+        return response;
+      } catch (error) {
+        logger.logToolResult(caller, toolName, false, undefined, error as Error);
+        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'add_wiki_page_attachment',
+    'Attach files (for example a local markdown file) to an existing wiki page. Each file is provided by a local filePath the server reads, or by base64 content. ' +
+      'This is the only wiki write the OpenProject API supports and it requires the "edit wiki pages" permission. ' +
+      'Note that attaching a markdown file does NOT set the page body — the API cannot write wiki page content; the returned markdownSnippets can be pasted into the page in the web UI to reference the uploaded files.',
+    {
+      id: z.number().describe('Wiki page ID to attach the files to'),
+      attachments: z.array(wikiAttachmentInputSchema).min(1).describe('Files to attach to the wiki page'),
+    },
+    async ({ id, attachments }) => {
+      const toolName = 'add_wiki_page_attachment';
+      const caller = `tool:${toolName}`;
+      logger.logToolInvocation(caller, toolName, { id, attachments: attachments.length });
+      client.setCaller(caller);
+
+      try {
+        // Wiki page bodies are not writable through the API, so nothing is
+        // embedded automatically: every file is uploaded as a plain attachment.
+        const prepared = (await prepareAttachments(attachments)).map((item) => ({ ...item, inline: false }));
+        const { results } = await uploadPreparedAttachmentsWith(
+          (attachment) => client.createWikiPageAttachment(id, attachment),
+          prepared
+        );
+
+        const uploaded = results.filter((entry) => entry.status === 'uploaded').length;
+        const result = {
+          wikiPageId: id,
+          summary: { requested: results.length, uploaded, failed: results.length - uploaded },
+          attachments: results,
+          markdownSnippets: buildWikiAttachmentMarkdown(results),
+          note: WIKI_API_LIMITATION,
+        };
+
+        const failedEverything = uploaded === 0;
+        const response = {
+          content: [{ type: 'text' as const, text: formatResponse(result) }],
+          ...(failedEverything ? { isError: true } : {}),
+        };
+        logger.logToolResult(caller, toolName, !failedEverything, result);
+        return response;
+      } catch (error) {
+        logger.logToolResult(caller, toolName, false, undefined, error as Error);
+        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'create_wiki_page',
+    'Create a wiki page with a markdown body. Provide the body as a local markdown file ("filePath") or inline ("markdown"). ' +
+      'Use this for any request to create/publish/write a wiki page, including publishing a .md file from the repo to the project wiki. ' +
+      'This drives OpenProject\'s web session (OpenProject API v3 has no wiki write endpoint), so it needs OPENPROJECT_USERNAME and OPENPROJECT_PASSWORD configured for an account with the "edit wiki pages" permission.',
+    {
+      projectId: z.union([z.number(), z.string()]).describe('Project ID, identifier, or NAME (e.g. "KUP Kardal Unified Portal")'),
+      title: z.string().describe('Title of the new wiki page'),
+      filePath: z.string().optional().describe('Path to a local markdown file to use as the page body. Provide this OR markdown, not both.'),
+      markdown: z.string().optional().describe('Inline markdown body. Provide this OR filePath, not both.'),
+      parentId: z.number().optional().describe('Optional parent wiki page ID, to nest the page in the wiki menu'),
+      journalNotes: z.string().optional().describe('Optional comment describing the change'),
+    },
+    async ({ projectId, title, filePath, markdown, parentId, journalNotes }) => {
+      const toolName = 'create_wiki_page';
+      const caller = `tool:${toolName}`;
+      logger.logToolInvocation(caller, toolName, { projectId, title, filePath, markdown: markdown?.length, parentId, journalNotes });
+      client.setCaller(caller);
+
+      try {
+        const session = requireWikiSession();
+        const body = await resolveMarkdownInput({ markdown, filePath });
+        const project = await resolveProjectIdentifier(client, projectId);
+        const page = await session.createPage({
+          projectRef: project.identifier,
+          title,
+          markdown: body,
+          parentId,
+          journalNotes,
+        });
+
+        const result = {
+          status: 'created',
+          project: { id: project.id, identifier: project.identifier, name: project.name },
+          title: page.title,
+          slug: page.slug,
+          url: page.url,
+          source: filePath ? { filePath } : { markdown: 'inline' },
+          bodyCharacters: page.markdown.length,
+          verified: page.markdown.trim() !== '',
+        };
+        const response = { content: [{ type: 'text' as const, text: formatResponse(result) }] };
+        logger.logToolResult(caller, toolName, true, result);
+        return response;
+      } catch (error) {
+        logger.logToolResult(caller, toolName, false, undefined, error as Error);
+        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'update_wiki_page',
+    'Replace an existing wiki page\'s markdown body (and optionally rename it). Provide the new body as a local markdown file ("filePath") or inline ("markdown"). ' +
+      'The page is identified by its URL slug within the project. Uses OpenProject\'s web session and the edit form\'s lockVersion, so a concurrent edit is rejected rather than silently overwritten. ' +
+      'Requires OPENPROJECT_USERNAME and OPENPROJECT_PASSWORD.',
+    {
+      projectId: z.union([z.number(), z.string()]).describe('Project ID, identifier, or NAME'),
+      slug: z.string().describe('Wiki page slug as it appears in the page URL (e.g. "kup" for /projects/x/wiki/kup)'),
+      filePath: z.string().optional().describe('Path to a local markdown file to use as the new body. Provide this OR markdown.'),
+      markdown: z.string().optional().describe('Inline markdown body. Provide this OR filePath.'),
+      title: z.string().optional().describe('Optional new title (renames the page)'),
+      journalNotes: z.string().optional().describe('Optional comment describing the change'),
+    },
+    async ({ projectId, slug, filePath, markdown, title, journalNotes }) => {
+      const toolName = 'update_wiki_page';
+      const caller = `tool:${toolName}`;
+      logger.logToolInvocation(caller, toolName, { projectId, slug, filePath, markdown: markdown?.length, title, journalNotes });
+      client.setCaller(caller);
+
+      try {
+        const session = requireWikiSession();
+        const body =
+          filePath === undefined && markdown === undefined
+            ? undefined
+            : await resolveMarkdownInput({ markdown, filePath });
+        const project = await resolveProjectIdentifier(client, projectId);
+        const page = await session.updatePage({
+          projectRef: project.identifier,
+          slug,
+          markdown: body,
+          title,
+          journalNotes,
+        });
+
+        const result = {
+          status: 'updated',
+          project: { id: project.id, identifier: project.identifier, name: project.name },
+          title: page.title,
+          slug: page.slug,
+          url: page.url,
+          bodyCharacters: page.markdown.length,
+        };
+        const response = { content: [{ type: 'text' as const, text: formatResponse(result) }] };
+        logger.logToolResult(caller, toolName, true, result);
+        return response;
+      } catch (error) {
+        logger.logToolResult(caller, toolName, false, undefined, error as Error);
+        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'get_wiki_page_content',
+    'Get a wiki page\'s markdown body by project and page slug. This is the only way to read wiki content — get_wiki_page returns metadata only, because the API does not expose page bodies. ' +
+      'Requires OPENPROJECT_USERNAME and OPENPROJECT_PASSWORD.',
+    {
+      projectId: z.union([z.number(), z.string()]).describe('Project ID, identifier, or NAME'),
+      slug: z.string().describe('Wiki page slug as it appears in the page URL'),
+    },
+    async ({ projectId, slug }) => {
+      const toolName = 'get_wiki_page_content';
+      const caller = `tool:${toolName}`;
+      logger.logToolInvocation(caller, toolName, { projectId, slug });
+      client.setCaller(caller);
+
+      try {
+        const session = requireWikiSession();
+        const project = await resolveProjectIdentifier(client, projectId);
+        const markdown = await session.getPageMarkdown(project.identifier, slug);
+
+        const result = {
+          project: { id: project.id, identifier: project.identifier, name: project.name },
+          slug,
+          url: `${process.env.OPENPROJECT_URL?.replace(/\/$/, '')}/projects/${project.identifier}/wiki/${slug}`,
+          bodyCharacters: markdown.length,
+          markdown,
+        };
+        const response = { content: [{ type: 'text' as const, text: formatResponse(result) }] };
+        logger.logToolResult(caller, toolName, true, { ...result, markdown: `${markdown.length} chars` });
+        return response;
+      } catch (error) {
+        logger.logToolResult(caller, toolName, false, undefined, error as Error);
+        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
       }
     }
   );

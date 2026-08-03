@@ -66,6 +66,15 @@ export interface AttachmentClient {
   ): Promise<Attachment>;
 }
 
+/**
+ * Uploads one prepared file to whichever container it belongs to (a work package
+ * or a wiki page). Parameterising the upload keeps the per-file loop — and its
+ * error handling — shared across containers.
+ */
+export type AttachmentUploader = (
+  attachment: { fileName: string; content: Uint8Array; contentType?: string; description?: string }
+) => Promise<Attachment>;
+
 // Common file extensions → MIME types. Images are listed first so the inline
 // detection has good coverage; a handful of frequent document types follow.
 const EXTENSION_CONTENT_TYPES: Record<string, string> = {
@@ -198,12 +207,28 @@ export async function uploadPreparedAttachments(
   workPackageId: number,
   prepared: PreparedAttachment[]
 ): Promise<{ results: UploadedAttachmentResult[]; inlineMarkdown: string }> {
+  return uploadPreparedAttachmentsWith(
+    (attachment) => client.createWorkPackageAttachment(workPackageId, attachment),
+    prepared
+  );
+}
+
+/**
+ * Container-agnostic upload loop behind {@link uploadPreparedAttachments}. Wiki
+ * pages reuse it via `createWikiPageAttachment`; since a wiki page body cannot be
+ * written through the API, wiki callers pass items with `inline` already false so
+ * no inline markdown is generated for them.
+ */
+export async function uploadPreparedAttachmentsWith(
+  upload: AttachmentUploader,
+  prepared: PreparedAttachment[]
+): Promise<{ results: UploadedAttachmentResult[]; inlineMarkdown: string }> {
   const results: UploadedAttachmentResult[] = [];
   const inlineSnippets: string[] = [];
 
   for (const item of prepared) {
     try {
-      const attachment = await client.createWorkPackageAttachment(workPackageId, {
+      const attachment = await upload({
         fileName: item.fileName,
         content: item.content,
         contentType: item.contentType,

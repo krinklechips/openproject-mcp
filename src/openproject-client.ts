@@ -171,6 +171,17 @@ export interface Attachment {
   _links: Record<string, { href: string; title?: string }>;
 }
 
+/**
+ * A wiki page as returned by API v3. The representer is deliberately thin —
+ * `id` and `title` are the only properties, both read-only; the page body is not
+ * exposed by the API. Related resources (project, attachments) come via `_links`.
+ */
+export interface WikiPage {
+  id: number;
+  title: string;
+  _links: Record<string, { href: string; title?: string }>;
+}
+
 export interface OpenProjectError {
   _type: 'Error';
   errorIdentifier: string;
@@ -613,6 +624,38 @@ export class OpenProjectClient {
 
   async deleteAttachment(id: number): Promise<void> {
     await this.request('DELETE', `/attachments/${id}`);
+  }
+
+  // ============== Wiki Pages ==============
+
+  /**
+   * Fetch a wiki page's metadata. `GET /api/v3/wiki_pages/{id}` is the only wiki
+   * verb the API offers, and it returns id/title/links only — never the page
+   * body. There is no list endpoint and no create/update/delete counterpart.
+   */
+  async getWikiPage(id: number): Promise<WikiPage> {
+    return this.request('GET', `/wiki_pages/${id}`);
+  }
+
+  async listWikiPageAttachments(wikiPageId: number): Promise<HALResponse<Attachment>> {
+    return this.request('GET', `/wiki_pages/${wikiPageId}/attachments`);
+  }
+
+  /**
+   * Attach a file to a wiki page. This is the one wiki write the API supports;
+   * it requires the "edit wiki pages" permission in the page's project.
+   */
+  async createWikiPageAttachment(
+    wikiPageId: number,
+    attachment: { fileName: string; content: Uint8Array; contentType?: string; description?: string }
+  ): Promise<Attachment> {
+    return this.uploadMultipart(
+      `/wiki_pages/${wikiPageId}/attachments`,
+      attachment.fileName,
+      attachment.content,
+      attachment.contentType,
+      attachment.description
+    );
   }
 
   // ============== Users ==============

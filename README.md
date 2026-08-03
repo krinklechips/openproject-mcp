@@ -82,7 +82,37 @@ Once connected, you can ask your AI assistant to:
 - "Move #45, #46 and #47 to the next sprint and assign them all to Bob" (bulk update in one call)
 - "How many hours did Vanntha log last month?" (timesheet totals per user, project and day)
 - "Summary total hours by members, by projects in 1 table for last month" (timesheet member × project summary table)
+- "Show me wiki page 37 and attach these notes to it" (wiki page metadata + attachments — see the limitation below)
 - And much more...
+
+### Wiki module support
+
+Publish a markdown file straight to a project wiki:
+
+> "Use docs/KUP-Project-Specification.md to create a wiki page in the KUP project"
+
+| Operation | Tool | Auth needed |
+|---|---|---|
+| Create a page from markdown | `create_wiki_page` | Username + password |
+| Replace a page body / rename | `update_wiki_page` | Username + password |
+| Read a page body as markdown | `get_wiki_page_content` | Username + password |
+| Get page metadata | `get_wiki_page` | API key |
+| List / add / delete attachments | `list_wiki_page_attachments`, `add_wiki_page_attachment`, `delete_attachment` | API key |
+
+**Why wiki writing needs a password.** OpenProject's REST API cannot create or update wiki
+pages, and never returns page bodies — API v3 declares exactly one wiki endpoint,
+`GET /api/v3/wiki_pages/{id}`, whose response contains only `id`, `title` and links. (Docs
+claiming a `POST /api/v3/projects/{id}/wiki_pages` endpoint are wrong; it returns 404.) So the
+write tools log in and drive the same web forms the UI uses. Add to your environment:
+
+```bash
+OPENPROJECT_USERNAME=your-username
+OPENPROJECT_PASSWORD=your-password
+```
+
+Use an account with the **"edit wiki pages"** permission, and note that accounts behind 2FA or
+SSO cannot be used. Without these variables everything else still works — only the three wiki
+write tools return an error explaining what to set.
 
 ## Documentation
 
