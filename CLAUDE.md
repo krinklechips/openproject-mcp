@@ -77,6 +77,12 @@ bun update
    - Authentication via Basic Auth with API key
    - Request/response typing with TypeScript interfaces
 
+5. **src/work-package-search.ts** - Smart work package search helpers
+   - Typo-tolerant scoring + bounded local ranking on top of OpenProject's `search` filter
+   - Backs `search_work_packages` / `semantic_search_project_work_packages`
+
+6. **src/logger.ts** - Daily file logging separated by caller/initiator (see LOGGING.md)
+
 ### Data Flow
 
 ```
@@ -232,11 +238,12 @@ When referencing related resources, use the `_links` structure:
 - **Types**: List available work package types
 - **Statuses**: List available statuses
 - **Priorities**: List available priorities
-- **Time Entries**: CRUD operations; `get_timesheet_total` aggregates logged hours for a user or the whole team over named periods (today/yesterday/this_week/last_week/this_month/last_month) or an explicit date range, with per-user/per-project/per-date breakdowns (helpers in `src/timesheet.ts`)
+- **Time Entries**: CRUD operations; `get_timesheet_total` aggregates logged hours for a user or the whole team over named periods (today/yesterday/this_week/last_week/this_month/last_month) or an explicit date range, with per-user/per-project/per-date breakdowns; `get_timesheet_summary_table` renders a single member × project logged-hours matrix with grand totals for the same periods/ranges — use it for prompts like "hours by members AND by projects in ONE table" (helpers in `src/timesheet.ts`)
 - **Versions**: CRUD operations (milestones/releases)
 - **Activities**: View journal entries
 - **Principals**: List users, groups, and placeholder users
-- **Attachments**: `create_work_package` and `update_work_package` accept an optional `attachments` array; `list_work_package_attachments` and `delete_attachment` manage existing files. Each attachment is supplied by a local `filePath` (server reads it) **or** `base64` content, with optional `fileName`/`contentType`/`description`. **Image** files (content type `image/*`) are embedded **inline in the work package description** as markdown (`![fileName](/api/v3/attachments/{id}/content)`); **all other file types** are attached as normal work package file attachments. The `inline` flag overrides this per file (defaults to true for images, false otherwise). Uploads use OpenProject's `multipart/form-data` attachment endpoint (`OpenProjectClient.uploadMultipart` / `createWorkPackageAttachment`); preparation, content-type detection, the inline-image decision and the description-merge happen in `src/attachments.ts`. Flow: the work package is created/updated first, attachments are uploaded to it, then the description is patched once (via `updateWithLockRetry`) to embed any inline images. A failed individual upload is reported per-file without aborting the rest; when attachments are present the tool returns `{ workPackage, attachments: [...] }`.
+- **Memberships**: `list_memberships` (all), `list_project_members`, `list_work_package_members`
+- **Attachments**: `create_work_package` and `update_work_package` accept an optional `attachments` array; `list_work_package_attachments` and `delete_attachment` manage existing files. Each attachment is supplied by a local `filePath` (server reads it) **or** `base64` content, with optional `fileName`/`contentType`/`description`. **Image** files (content type `image/*`) are embedded **inline in the work package description** as markdown (`![fileName](/api/v3/attachments/{id}/content)`); **all other file types** are attached as normal work package file attachments. The `inline` flag overrides this per file (defaults to true for images, false otherwise). Uploads use OpenProject's `multipart/form-data` attachment endpoint (`OpenProjectClient.uploadMultipart` / `createWorkPackageAttachment`); preparation, content-type detection, the inline-image decision and the description-merge happen in `src/attachments.ts`. Flow: the work package is created/updated first, attachments are uploaded to it, then the description is patched once (via `updateWithLockRetry`, exported from `src/bulk-update.ts`) to embed any inline images. A failed individual upload is reported per-file without aborting the rest; when attachments are present the tool returns `{ workPackage, attachments: [...] }`.
 
 - **Wiki Pages**: split across two transports, because the REST API cannot write wiki pages.
   - **Via the API key** (`src/wiki.ts`): `get_wiki_page` (metadata), `list_wiki_page_attachments`, `add_wiki_page_attachment`; `delete_attachment` removes a file. `get_wiki_page` takes a **numeric ID only** (no lookup by title/slug) and returns `contentAvailable: false` — the API never exposes page bodies.
@@ -245,7 +252,7 @@ When referencing related resources, use the `_links` structure:
   - **How the session writer works.** It logs in through `/login` and replays OpenProject's own forms: `POST /projects/:p/wiki/new` to create, `PUT /projects/:p/wiki/:slug` to update, `GET /projects/:p/wiki/:slug.markdown` to read. Rather than hardcoding fields it re-fetches each form and resubmits **all** of its inputs (`authenticity_token`, `_method`, `page[lock_version]`, `page[parent_id]`), overriding only `page[title]` / `page[text]` / `page[journal_notes]` — so CSRF and optimistic locking stay correct and added hidden fields do not break it. Web routes are addressed by project **identifier** (`resolveProjectIdentifier`), not numeric ID.
 
 ### Future Endpoint Categories to Implement
-See README.md for comprehensive list of 40+ endpoint categories including memberships, roles, relations, queries, notifications, attachments, file links, and more.
+See README.md for comprehensive list of 40+ endpoint categories including roles, relations, queries, notifications, file links, and more.
 
 ## TypeScript Configuration
 
