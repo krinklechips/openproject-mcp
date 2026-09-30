@@ -85,6 +85,57 @@ Once connected, you can ask your AI assistant to:
 - "Show me wiki page 37 and attach these notes to it" (wiki page metadata + attachments — see the limitation below)
 - And much more...
 
+### Native sprint planning (OpenProject 17.3+)
+
+This connector now understands native **sprints**, which are separate from
+release **versions**. It uses the existing API key and the connected account's
+permissions. It does not unlock Enterprise features or change the OpenProject UI.
+
+| Tool | Purpose |
+|---|---|
+| `list_project_sprints` | List planned, active and completed sprints, with pagination. |
+| `get_sprint` | Read sprint dates/state and show browser planning links. |
+| `list_sprint_work_packages` | Read assigned work, including closed items; report incomplete results. |
+| `get_sprint_readiness` | Flag missing assignees, estimates and dates, and finish dates outside the sprint. |
+| `plan_weekly_sprints` | Draft Monday-Sunday weeks and identify existing/overlapping sprints. Does not save them. |
+| `assign_work_packages_to_sprint` | Preview, then apply requested task moves with optimistic locking and readback. |
+
+Example prompts:
+
+- "List KUP's planned sprints."
+- "Prepare the next two weekly sprints starting Monday 5 October 2026."
+- "Check whether sprint 24 has owners, estimates and dates for every open item."
+- "Preview moving tasks 101 and 102 into sprint 24."
+- "Apply those reviewed moves." The caller supplies the lockVersions from the
+  preview and `apply: true`. Conflicts require a fresh preview; they are not retried.
+
+Use numeric project and sprint IDs. These management tools handle sprints defined
+in that project; shared/cross-project sprint management is intentionally excluded.
+Assignment batches are limited to 50 items. Every item is validated before any
+write; writes stop at the first failure. A failed response is reported as
+unconfirmed rather than assumed not to have saved. Task owners, dates and statuses
+are not changed by the assignment tool. Notifications default to OpenProject's
+normal behavior (`notify: true`).
+
+**Lifecycle limitation:** the documented sprint API provides reads, not
+create/edit/start/complete operations. Use **Backlogs > Backlog and sprints** for
+those actions; the tools return project-relative planning links. The weekly plan
+is explicitly a draft. No invented write endpoints, direct database changes or
+stored browser credentials are used. The server enforces permissions and edition
+limits, including multiple active sprints and sprint sharing.
+
+Readiness reports describe **current state**, not historical weekly throughput.
+`Closed` with `isClosed=true` is counted separately from `Rejected` and other
+closed states. Verify acceptance evidence and team capacity before starting a
+sprint. Unknown statuses, empty sprints and truncated task collections cannot
+produce a ready result. The API does not expose sprint goals on the verified
+installation, so this tool does not claim to validate them.
+
+After installing the update, reconnect/restart the MCP client to refresh its tool
+catalog. The configured API key and OpenProject database stay the same.
+
+Reference: [OpenProject sprint API](https://www.openproject.org/docs/api/endpoints/sprints/).
+
 ### Wiki module support
 
 Publish a markdown file straight to a project wiki:

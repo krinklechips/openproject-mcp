@@ -60,6 +60,7 @@ import {
   rankWorkPackageSearchResults,
 } from './work-package-search.ts';
 import logger from './logger.ts';
+import { registerSprintTools } from './sprint-tools.ts';
 
 export interface ServerConfig {
   name?: string;
@@ -478,6 +479,8 @@ export function setupMcpServer(config: ServerConfig = {}): { server: McpServer; 
   });
 
   let client: OpenProjectClient;
+
+  registerSprintTools(server, () => client);
 
   const initClient = async (): Promise<OpenProjectClient> => {
     client = createClient('system');
