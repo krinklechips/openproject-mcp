@@ -49,7 +49,7 @@ active sprints and sharing remain subject to OpenProject's edition and settings.
 
 ## Verification commands
 
-Use `/Users/enochphan/.local/share/openproject-mcp-runtime/node_modules/.bin/bun`.
+Use the installed `bun` executable.
 Run `bun test tests/sprint-tools.test.ts` for red/green, then focused bulk-update,
 work-package and sprint tests. Live check is read-only/validation-only and must
 not log credentials. No Portal/Core changes or related CI changes are in scope.
