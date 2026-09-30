@@ -151,6 +151,26 @@ export interface Version {
   _links: Record<string, { href: string; title?: string }>;
 }
 
+/** Native sprints (OpenProject 17.3+), distinct from release versions. */
+export interface Sprint {
+  _type: 'Sprint';
+  id: number;
+  name: string;
+  startDate?: string | null;
+  finishDate?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  _links: Record<string, { href: string | null; title?: string }>;
+}
+
+export interface WorkPackageValidationForm {
+  _embedded?: {
+    validationErrors?: Record<string, unknown>;
+    schema?: { sprint?: { writable?: boolean } };
+    payload?: { _links?: { sprint?: { href: string | null } } };
+  };
+}
+
 export interface Activity {
   id: number;
   comment?: { format: string; raw: string; html: string };
@@ -536,6 +556,23 @@ export class OpenProjectClient {
     return this.request('GET', `/work_packages/${id}`);
   }
 
+  async listProjectSprints(projectId: number, params?: {
+    offset?: number; pageSize?: number; filters?: string;
+  }): Promise<HALResponse<Sprint>> {
+    return this.request('GET', `/projects/${projectId}/sprints`, undefined, params);
+  }
+
+  async getSprint(id: number): Promise<Sprint> {
+    return this.request('GET', `/sprints/${id}`);
+  }
+
+  /** POST form validates only. It does not persist a work-package change. */
+  async validateWorkPackageUpdate(id: number, data: {
+    lockVersion: number; _links: { sprint: { href: string } };
+  }): Promise<WorkPackageValidationForm> {
+    return this.request('POST', `/work_packages/${id}/form`, data);
+  }
+
   async createWorkPackage(
     projectId: number | string,
     data: {
@@ -574,6 +611,7 @@ export class OpenProjectClient {
         responsible?: { href: string };
         version?: { href: string };
         parent?: { href: string };
+        sprint?: { href: string };
       };
       startDate?: string;
       dueDate?: string;
